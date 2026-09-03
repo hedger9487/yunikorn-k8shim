@@ -20,6 +20,8 @@ package shim
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -201,6 +203,46 @@ func TestSchedulerStopStopsAPIFactory(t *testing.T) {
 	assert.Check(t, apiProvider.stopped.Load(), "API provider should be stopped with the scheduler")
 
 	shim.Stop()
+}
+
+func countSchedulingLoops() int {
+	buf := make([]byte, 64*1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	return strings.Count(string(buf), "(*KubernetesShim).doScheduling")
+}
+
+func waitForSchedulingLoops(targetCount int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countSchedulingLoops() == targetCount {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return countSchedulingLoops() == targetCount
+}
+
+func TestSchedulingLoopsShutdownOnStop(t *testing.T) {
+	cluster := MockScheduler{}
+	cluster.init()
+	assert.NilError(t, cluster.start(), "failed to start cluster")
+	assert.Check(t, cluster.started.Load(), "cluster should be started")
+
+	// Ensure both scheduling loops are active
+	assert.Assert(t, waitForSchedulingLoops(2, 5*time.Second),
+		"both scheduling loops should be running after cluster start")
+
+	// Verify stop terminates both scheduling loops
+	cluster.stop()
+	assert.Assert(t, waitForSchedulingLoops(0, 5*time.Second),
+		"both scheduling loops should terminate when scheduler is stopped")
 }
 
 func TestNewCallbackWithCancel(t *testing.T) {
